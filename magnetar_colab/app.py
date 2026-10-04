@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections import deque
 
 import gradio as gr
 
-from . import config, pipeline, transcoder
+from . import config, pipeline, trackers, transcoder
 from .torrent_client import HAVE_LIBTORRENT, TorrentClient
 
 log = logging.getLogger(config.LOG)
@@ -186,6 +187,30 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
         except (ValueError, RuntimeError) as exc:
             raise gr.Error(str(exc)) from exc
 
+    _cancel_choices_seen = {"key": None}
+
+    def cancel_choices():
+        snaps = client.snapshots()
+        key = tuple(snap.info_hash for snap in snaps)
+        if key == _cancel_choices_seen["key"]:
+            return gr.update()  # unchanged -> leave the dropdown alone
+        _cancel_choices_seen["key"] = key
+        return gr.update(choices=[(f"{snap.name}  ({snap.info_hash[:8]}...)", snap.info_hash)
+                                  for snap in snaps])
+
+    def cancel_handler(info_hash: str):
+        if not info_hash:
+            raise gr.Error("Pick a torrent from the dropdown first.")
+        name = ""
+        for snap in client.snapshots():
+            if snap.info_hash == info_hash:
+                name = snap.name
+                break
+        client.discard(info_hash)  # stops the download and deletes its files
+        msg = f"Cancelled '{name or info_hash[:8]}' and deleted its downloaded files."
+        log.info(msg)
+        return msg, gr.update(choices=[], value=None)
+
     def refresh_downloads():
         rows = []
         for snap in client.snapshots():
@@ -262,6 +287,11 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
                 sel_summary = gr.Markdown("Fetch a file list to begin.", container=False)
                 dl_btn = gr.Button("2️⃣ Start download", variant="primary")
                 dl_status = gr.Markdown(container=False)
+                with gr.Row():
+                    cancel_dd = gr.Dropdown(label="Active torrent",
+                                            choices=[], scale=3)
+                    cancel_btn = gr.Button("🗑 Cancel & delete files", variant="stop", scale=1)
+                cancel_status = gr.Markdown(container=False)
                 gr.Markdown("### Active downloads (auto-refresh)")
                 dl_table = gr.Dataframe(headers=DL_HEADERS, value=[], interactive=False)
 
@@ -324,6 +354,8 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
                              inputs=[browse_dd, data_state, sel_state],
                              outputs=[sel_state, sel_summary, folders_group, files_group])
         dl_btn.click(download_handler, inputs=[data_state, sel_state], outputs=[dl_status])
+        cancel_btn.click(cancel_handler, inputs=[cancel_dd],
+                         outputs=[cancel_status, cancel_dd])
 
         scan_btn.click(scan_handler, inputs=[target_res],
                        outputs=[plan_table, include_group, scan_summary])
@@ -334,9 +366,33 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
         gpu_btn.click(gpu_handler, outputs=[gpu_md])
 
         timer = gr.Timer(1.0)
-        timer.tick(lambda: (refresh_downloads(), refresh_jobs(), refresh_log()),
-                   outputs=[dl_table, jobs_table, log_tb])
+        timer.tick(lambda: (refresh_downloads(), refresh_jobs(), refresh_log(),
+                            cancel_choices()),
+                   outputs=[dl_table, jobs_table, log_tb, cancel_dd])
     return demo
+
+
+def _keep_colab_alive() -> None:
+    """Best-effort: fake a connect-button click on the Colab page every minute so
+    free runtimes don't idle-disconnect while the Gradio UI is used from another
+    tab. Harmless no-op where the selectors no longer match."""
+    if not config.IS_COLAB:
+        return
+    try:
+        from IPython.display import Javascript, display
+        display(Javascript("""
+        (function () {
+          if (window.__magnetarKeepAlive) return;
+          window.__magnetarKeepAlive = setInterval(function () {
+            var btn = document.querySelector('colab-connect-button')
+                   || document.querySelector('#connect')
+                   || document.querySelector('button[aria-label*="onnect"]');
+            if (btn) btn.click();
+          }, 60000);
+        })();"""))
+        log.info("Colab keep-alive injected (connect click every 60s).")
+    except Exception as exc:
+        log.info("keep-alive not available: %s", exc)
 
 
 def launch() -> None:
@@ -350,6 +406,7 @@ def launch() -> None:
 
     client = TorrentClient()
     client.start()
+    trackers.refresh_async(apply_cb=client.apply_trackers)
     pipe = pipeline.Pipeline()
     demo = build_ui(client, pipe, ring)
 
@@ -362,9 +419,21 @@ def launch() -> None:
     print(f"{config.human_size(free)}" if free else "unknown")
     print("=" * 62)
 
-    demo.launch(
-        share=True,
-        show_error=True,
-        inbrowser=False,
-        auth=("user", password) if password else None,
-    )
+    _keep_colab_alive()
+    try:
+        demo.launch(
+            share=True,
+            show_error=True,
+            inbrowser=False,
+            auth=("user", password) if password else None,
+        )
+    except KeyboardInterrupt:
+        log.info("UI stopped.")
+    # never let the cell finish - a completed cell lets Colab idle-disconnect
+    print("UI cell keeps running to hold the Colab session open. "
+          "Interrupt again to release the runtime.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("Runtime released - Colab may disconnect after the idle timeout.")

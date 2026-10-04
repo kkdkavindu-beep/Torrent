@@ -67,6 +67,18 @@ def test_picker_logic():
     print("picker logic OK")
 
 
+def test_trackers():
+    from magnetar_colab import config, trackers
+    text = "# comment\n\nudp://good.example.com:1337/announce\nhttp://x.example.org/announce\nnot a url\n"
+    parsed = trackers.parse_tracker_list(text)
+    assert parsed == ["udp://good.example.com:1337/announce", "http://x.example.org/announce"]
+    assert len(config.DEFAULT_TRACKERS) >= 20, "fallback list too thin"
+    assert any(t.startswith("wss://") for t in config.DEFAULT_TRACKERS)
+    assert config.DHT_BOOTSTRAP_NODES.count(":") >= 4
+    print(f"trackers OK: {len(config.DEFAULT_TRACKERS)} embedded fallback trackers")
+
+
 if __name__ == '__main__':
     test_magnets()
     test_picker_logic()
+    test_trackers()

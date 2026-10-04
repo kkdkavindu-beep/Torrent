@@ -27,7 +27,15 @@ nothing is downloaded yet). Torrents with folders get a **folder checklist**
 (one click selects/deselects everything inside) plus a *Browse inside a folder*
 dropdown for picking individual files, with "all/clear view" buttons and a live
 "Selected x/y files" summary. Hit *Start download*; progress (per file, speed,
-peers, ETA) auto-refreshes every second.
+peers, ETA) auto-refreshes every second. **Cancel & delete files** stops a
+running torrent midway and removes everything it wrote.
+
+Peer discovery is tuned for Colab's NATed, outbound-only network: magnets are
+augmented with ~25 curated trackers, and the live daily-ranked
+[ngosang/trackerslist](https://github.com/ngosang/trackerslist) best list is
+fetched in the background each session (cached on Drive), pushed to torrents
+already in the session. The client announces to all trackers/tiers at once and
+keeps up to 500 connections.
 
 **Tab 2 · Videos → Drive** — *Scan downloads* probes every media file with
 ffprobe and shows container / codec / resolution / audio. Choose a target
@@ -69,13 +77,16 @@ deleted from the workspace.
 
 ## Notes & limitations
 
+- The launcher's last cell blocks forever on purpose (plus a keep-alive click on
+  the Colab connect button every minute) — that's what keeps the free runtime
+  from idling out while you use the Gradio link in another tab. Interrupt twice
+  to shut down.
 - Colab VMs are NATed (no inbound ports), but outbound-only uTP/DHT works fine
   for most public torrents; magnets are augmented with a tracker list to
   improve peer discovery.
 - Files already on Drive with the same name **and** size are skipped, so
   re-running a job is safe.
-- Free Colab sessions idle out after ~90 min and hard-stop at ~12 h; long
-  downloads won't survive a disconnect. Finish, upload, then close.
+- Free Colab sessions hard-stop at ~12 h; downloads won't survive a disconnect.
 - If a torrent shows no metadata after 45 s it's probably dead — try another
   source.
 

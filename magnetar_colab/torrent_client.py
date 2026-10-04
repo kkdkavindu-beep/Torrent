@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import config, magnets
+from . import config, magnets, trackers
 
 log = logging.getLogger(config.LOG)
 
@@ -57,9 +57,13 @@ def _make_session(settings: dict):
         try:
             return lt.session(dict(settings))
         except Exception:
-            params = lt.session_params()
             merged = dict(lt.default_settings())
-            merged.update(settings)
+            for key, value in settings.items():
+                if key in merged:
+                    merged[key] = value
+                else:
+                    log.debug("setting %r not in this libtorrent build - skipped", key)
+            params = lt.session_params()
             params.settings = merged
             return lt.session(params)
     sp = lt.settings_pack()
@@ -200,6 +204,12 @@ class TorrentClient:
                 "enable_outgoing_utp": True,
                 "alert_mask": _alert_mask(),
                 "user_agent": "MagnetarColab/1.0",
+                # speed: Colab can only make outbound connections, so squeeze the
+                # most out of trackers/DHT - announce everywhere, keep many peers
+                "announce_to_all_trackers": True,
+                "announce_to_all_tiers": True,
+                "connections_limit": config.CONNECTIONS_LIMIT,
+                "dht_bootstrap_nodes": config.DHT_BOOTSTRAP_NODES,
             }
             self._session = _make_session(settings)
             self._stop.clear()
@@ -217,16 +227,20 @@ class TorrentClient:
             self._handles.clear()
 
     def _alert_loop(self) -> None:
+        noisy_alerts = ("tracker_error_alert", "udp_error_alert", "portmap_error_alert",
+                        "lsd_error_alert", "dht_reply_alert")
         while not self._stop.is_set():
             session = self._session
             if session is None:
                 return
             try:
                 for alert in session.pop_alerts():
+                    name = type(alert).__name__
+                    if name in noisy_alerts:
+                        continue  # per-tracker/UDP chatter, often ISP-level noise
                     msg = getattr(alert, "message", lambda: "")()
                     if not msg:
                         continue
-                    name = type(alert).__name__
                     if "error" in name.lower():
                         log.warning("libtorrent: %s: %s", name, msg)
                     elif name in ("metadata_received_alert", "torrent_finished_alert"):
@@ -263,7 +277,7 @@ class TorrentClient:
         with self._lock:
             handle = self._handles.get(ih)
             if handle is None:
-                handle = self._add_magnet(magnets.augment(magnet_uri))
+                handle = self._add_magnet(magnets.augment(magnet_uri, trackers.current()))
                 self._handles[ih] = handle
 
         started = time.time()
@@ -354,7 +368,25 @@ class TorrentClient:
         return f"Downloading {len(selected_indices)} file(s), {config.human_size(wanted)} selected."
 
     def discard(self, info_hash: str) -> None:
+        """Cancel a torrent mid-download and delete everything it wrote."""
         self._remove(info_hash, delete_files=True)
+
+    def apply_trackers(self, tracker_urls: list[str]) -> int:
+        """Push extra trackers onto torrents already in the session."""
+        applied = 0
+        with self._lock:
+            handles = list(self._handles.items())
+        for _ih, handle in handles:
+            for url in tracker_urls:
+                # 2.1 bindings want a dict, older ones accept a plain string
+                for arg in ({"url": url}, url):
+                    try:
+                        handle.add_tracker(arg)
+                        applied += 1
+                        break
+                    except Exception:
+                        continue
+        return applied
 
     def _remove(self, info_hash: str, delete_files: bool) -> None:
         with self._lock:

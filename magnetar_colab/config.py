@@ -49,18 +49,22 @@ def drive_base(folder: str = DEFAULT_DRIVE_FOLDER) -> pathlib.Path:
     return path
 
 
-def ffmpeg_cache_dir() -> pathlib.Path:
-    """Where the NVENC-capable static ffmpeg is cached.
-
-    On Colab this lives on Drive so the ~100 MB build survives session restarts.
-    """
-    env = os.environ.get("MAGNETAR_FFMPEG_CACHE")
+def cache_dir() -> pathlib.Path:
+    """General cache dir: lives on Drive on Colab so downloads survive restarts."""
+    env = os.environ.get("MAGNETAR_CACHE")
     if env:
         path = pathlib.Path(env)
     elif IS_COLAB and drive_mounted():
-        path = DRIVE_MYDRIVE / ".cache" / "magnetar_ffmpeg"
+        path = DRIVE_MYDRIVE / ".cache" / "magnetar"
     else:
-        path = BASE_DIR / ".cache" / "ffmpeg"
+        path = BASE_DIR / ".cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def ffmpeg_cache_dir() -> pathlib.Path:
+    """Where the NVENC-capable static ffmpeg is cached."""
+    path = pathlib.Path(os.environ.get("MAGNETAR_FFMPEG_CACHE") or (cache_dir() / "ffmpeg"))
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -112,19 +116,43 @@ RES_BUCKETS = [
 MP4_INCOMPATIBLE_AUDIO = ("dts", "truehd", "mlp", "pcm_", "eac3")
 
 # ------------------------------------------------------------------- tuning
+# Curated fallback (magnetar originals + ngosang/trackerslist 'best' snapshot).
+# The live list is refreshed at runtime from TRACKER_LIST_URL (see trackers.py).
 DEFAULT_TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.demonii.com:1337/announce",
     "udp://open.stealth.si:80/announce",
     "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.demonii.com:1337/announce",
     "udp://exodus.desync.com:6969/announce",
     "udp://tracker.tiny-vps.com:6969/announce",
     "udp://tracker.cyberia.is:6969/announce",
     "udp://tracker.openbittorrent.com:6969/announce",
     "udp://tracker.dler.org:6969/announce",
     "udp://opentracker.i2p.rocks:6969/announce",
+    "udp://tracker.skynetcloud.site:6969/announce",
+    "udp://tracker.gmi.gd:6969/announce",
+    "udp://tracker.tryhackx.org:6969/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://tracker.theoks.net:6969/announce",
+    "udp://tracker.nyaa.vc:6969/announce",
+    "udp://tracker.corpscorp.online:80/announce",
+    "udp://tracker.bittor.pw:1337/announce",
+    "udp://tracker-udp.gbitt.info:80/announce",
+    "udp://tracker2.dler.org:80/announce",
+    "udp://tracker.ducks.party:1984/announce",
+    "http://tracker.qu.ax:6969/announce",
+    "http://tracker.dler.com:6969/announce",
+    "http://tracker.renfei.net:8080/announce",
     "wss://tracker.openwebtorrent.com",
 ]
+
+# ngosang/trackerslist publishes a health-ranked list daily
+TRACKER_LIST_URL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
+
+# more DHT entry points = faster peer discovery from a NATed Colab VM
+DHT_BOOTSTRAP_NODES = ("router.bittorrent.com:6881,router.utorrent.com:6881,"
+                       "dht.transmissionbt.com:6881,dht.libtorrent.org:25401")
+CONNECTIONS_LIMIT = 500
 
 PROBE_TIMEOUT_SEC = 45.0      # magnet -> metadata wait (same as Magnetar)
 PROBE_POLL_SEC = 0.4          # metadata poll interval
