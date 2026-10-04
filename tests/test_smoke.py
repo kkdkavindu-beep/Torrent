@@ -30,5 +30,43 @@ def test_magnets():
     print('magnets OK:', ih[:16] + '...', f'{len(tr2)} trackers after augment')
 
 
+def test_picker_logic():
+    from magnetar_colab import app
+    from magnetar_colab.torrent_client import TorrentFileEntry
+
+    files = [
+        TorrentFileEntry(index=0, path="Movie/Movie.1080p.mkv", size=1000),
+        TorrentFileEntry(index=1, path="Movie/sample.avi", size=100),
+        TorrentFileEntry(index=2, path="Movie/Subs/en.srt", size=10),
+        TorrentFileEntry(index=3, path="poster.jpg", size=5),
+    ]
+    data = app._build_picker_data(files)
+    assert set(data["folders"].keys()) == {"Movie", "Movie/Subs", ""}, data["folders"].keys()
+    assert data["folders"]["Movie"] == [0, 1]
+    assert data["folders"][""] == [3]
+    assert data["order"] == ["", "Movie", "Movie/Subs"], data["order"]
+    assert data["total_size"] == 1115
+
+    everything = set(range(4))
+    # unchecking all folders empties the selection
+    assert app._apply_folder_check([], data, everything) == set()
+    # checking just the Movie folder selects its files only
+    sel = app._apply_folder_check(["Movie"], data, set())
+    assert sel == {0, 1}
+    # per-file override inside a view then folder re-check restores the folder
+    sel = app._apply_view_check("Movie", ["1"], data, everything)
+    assert sel == {1, 2, 3}
+    sel = app._apply_view_check("Movie", [], data, everything)
+    assert sel == {2, 3}
+    # folder checkboxes reflect all-selected state
+    assert app._folder_values(data, everything) == ["", "Movie", "Movie/Subs"]
+    assert app._folder_values(data, {0, 1}) == ["Movie"]
+    # summary text
+    text = app._summary_text(data, {0, 3})
+    assert "2/4" in text and "1005 B" in text, text
+    print("picker logic OK")
+
+
 if __name__ == '__main__':
     test_magnets()
+    test_picker_logic()

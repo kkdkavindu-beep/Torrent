@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import pathlib
 from collections import deque
 
 import gradio as gr
@@ -16,6 +15,8 @@ log = logging.getLogger(config.LOG)
 DL_HEADERS = ["Item", "State", "Progress", "Size", "Speed", "Seeds/Peers", "ETA"]
 PLAN_HEADERS = ["File", "Type", "Container", "Video", "Resolution", "Audio", "Size", "Action"]
 JOB_HEADERS = ["File", "Stage", "Progress", "Transferred", "Size", "Details"]
+
+ALL_VIEW = "@all"
 
 
 class _RingHandler(logging.Handler):
@@ -39,6 +40,81 @@ def _setup_logging(ring: deque) -> None:
     logging.getLogger().addHandler(_RingHandler(ring))
 
 
+# ------------------------------------------------------- file picker internals
+def _build_picker_data(files) -> dict:
+    """Group probed torrent files by containing folder for the file picker."""
+    paths, sizes, folders = {}, {}, {}
+    for entry in files:
+        rel = entry.path.replace("\\", "/").lstrip("/")
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        paths[entry.index] = rel
+        sizes[entry.index] = entry.size
+        folders.setdefault(parent, []).append(entry.index)
+    order = sorted(folders, key=lambda d: (d != "", d.lower()))
+    return {
+        "paths": paths,
+        "sizes": sizes,
+        "folders": folders,          # dir path ("" = root) -> [indices]
+        "order": order,
+        "total_size": sum(sizes.values()),
+    }
+
+
+def _folder_label(data: dict, folder: str) -> str:
+    indices = data["folders"][folder]
+    size = sum(data["sizes"][i] for i in indices)
+    name = folder or "(root files)"
+    return f"📁 {name} — {len(indices)} file(s), {config.human_size(size)}"
+
+
+def _summary_text(data: dict, selection: set) -> str:
+    picked = sum(data["sizes"][i] for i in selection)
+    return (f"**Selected {len(selection)}/{len(data['paths'])} files — "
+            f"{config.human_size(picked)} of {config.human_size(data['total_size'])}**")
+
+
+def _folder_values(data: dict, selection: set) -> list[str]:
+    """Folder checkboxes reflect reality: checked iff every file inside is selected."""
+    return [d for d in data["order"]
+            if all(i in selection for i in data["folders"][d])]
+
+
+def _files_view_update(data: dict, selection: set, view: str):
+    if not data:
+        return gr.update()
+    if view == ALL_VIEW:
+        choices = [(f"{data['paths'][i]}  ({config.human_size(data['sizes'][i])})", str(i))
+                   for i in sorted(data["paths"])]
+    else:
+        choices = [(f"{data['paths'][i].rsplit('/', 1)[-1]}"
+                    f"  ({config.human_size(data['sizes'][i])})", str(i))
+                   for i in data["folders"].get(view, [])]
+    value = [v for _, v in choices if int(v) in selection]
+    return gr.update(choices=choices, value=value)
+
+
+def _apply_folder_check(checked_folders, data: dict, selection: set) -> set:
+    """Folder checkbox semantics are absolute: checked -> all its files selected."""
+    checked = set(checked_folders or [])
+    sel = set(selection or set())
+    for folder, indices in data["folders"].items():
+        if folder in checked:
+            sel.update(indices)
+        else:
+            sel.difference_update(indices)
+    return sel
+
+
+def _apply_view_check(view: str, checked, data: dict, selection: set) -> set:
+    """Replace the selection state of the files currently in view."""
+    sel = set(selection or set())
+    view_indices = set(range(len(data["paths"]))) if view == ALL_VIEW \
+        else set(data["folders"].get(view, []))
+    sel -= view_indices
+    sel |= {int(v) for v in (checked or [])}
+    return sel
+
+
 def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) -> gr.Blocks:
     # ------------------------------------------------------------------ tab 1
     def probe_handler(magnet: str, progress=gr.Progress()):
@@ -56,19 +132,57 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
         except (ValueError, TimeoutError) as exc:
             raise gr.Error(str(exc)) from exc
 
-        choices = [(f"{entry.path}  ({config.human_size(entry.size)})", str(entry.index))
-                   for entry in result.files]
+        data = _build_picker_data(result.files)
+        data["info_hash"] = result.info_hash
+        selection = set(data["paths"].keys())  # default: everything
+
+        # land the user in the biggest folder (unless the torrent is all loose files)
+        default_view = max(data["order"], key=lambda d: len(data["folders"][d])) \
+            if data["order"] else ALL_VIEW
+        browse_update = gr.update(
+            choices=[("All files", ALL_VIEW)] + [(_folder_label(data, d), d) for d in data["order"]],
+            value=default_view)
+        folders_update = gr.update(choices=[(_folder_label(data, d), d) for d in data["order"]],
+                                   value=list(data["order"]))
         label = (f"**{result.name}** - {len(result.files)} file(s), "
                  f"{config.human_size(result.total_size)} - {result.peers} peers connected.")
-        return (label, gr.update(choices=choices, value=[c[1] for c in choices]),
-                {"info_hash": result.info_hash})
+        return (label, browse_update, folders_update,
+                _files_view_update(data, selection, default_view),
+                data, selection, _summary_text(data, selection))
 
-    def download_handler(selected, state):
-        if not state or "info_hash" not in state:
+    def on_folders_change(checked_folders, browse, data, selection):
+        if not data:
             raise gr.Error("Fetch the file list first.")
-        indices = {int(s) for s in (selected or [])}
+        sel = _apply_folder_check(checked_folders, data, selection)
+        return sel, _summary_text(data, sel), _files_view_update(data, sel, browse)
+
+    def on_files_change(checked, browse, data, selection):
+        if not data:
+            raise gr.Error("Fetch the file list first.")
+        sel = _apply_view_check(browse, checked, data, selection)
+        return sel, _summary_text(data, sel), gr.update(value=_folder_values(data, sel))
+
+    def on_browse_change(browse, data, selection):
+        if not data:
+            return gr.update()
+        return _files_view_update(data, selection, browse)
+
+    def _force_view(browse, data, selection, want_all: bool):
+        sel = _apply_view_check(browse, None, data, selection)
+        if want_all:
+            view_indices = set(range(len(data["paths"]))) if browse == ALL_VIEW \
+                else set(data["folders"].get(browse, []))
+            sel |= view_indices
+        return (sel, _summary_text(data, sel), gr.update(value=_folder_values(data, sel)),
+                _files_view_update(data, sel, browse))
+
+    def download_handler(data, selection):
+        if not data:
+            raise gr.Error("Fetch the file list first.")
+        if not selection:
+            raise gr.Error("Nothing selected - check at least one folder or file.")
         try:
-            return client.start_download(state["info_hash"], indices)
+            return client.start_download(data["info_hash"], {int(i) for i in selection})
         except (ValueError, RuntimeError) as exc:
             raise gr.Error(str(exc)) from exc
 
@@ -133,9 +247,19 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
                 magnet_box = gr.Textbox(label="Magnet link", lines=3,
                                         placeholder="magnet:?xt=urn:btih:...")
                 probe_btn = gr.Button("1️⃣ Fetch file list", variant="primary")
-                probe_status = gr.Markdown("Paste a magnet link above, then fetch its file list.", container=False)
-                file_group = gr.CheckboxGroup(label="Files - uncheck what you don't want",
-                                              choices=[], value=[])
+                probe_status = gr.Markdown("Paste a magnet link above, then fetch its file list.",
+                                           container=False)
+                folders_group = gr.CheckboxGroup(label="Folders — check what you want",
+                                                 choices=[], value=[])
+                with gr.Row():
+                    browse_dd = gr.Dropdown(label="Browse inside a folder for individual files",
+                                            choices=[], scale=3)
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            pick_all_btn = gr.Button("✓ all in view", size="sm")
+                            clear_view_btn = gr.Button("✗ clear view", size="sm")
+                files_group = gr.CheckboxGroup(label="Files in view", choices=[], value=[])
+                sel_summary = gr.Markdown("Fetch a file list to begin.", container=False)
                 dl_btn = gr.Button("2️⃣ Start download", variant="primary")
                 dl_status = gr.Markdown(container=False)
                 gr.Markdown("### Active downloads (auto-refresh)")
@@ -178,11 +302,29 @@ def build_ui(client: TorrentClient, pipe: pipeline.Pipeline, log_ring: deque) ->
                     container=False)
                 log_tb = gr.Textbox(label="Log", lines=20, interactive=False)
 
-        probe_state = gr.State(None)
-        probe_btn.click(probe_handler, inputs=[magnet_box],
-                        outputs=[probe_status, file_group, probe_state])
+        data_state = gr.State(None)
+        sel_state = gr.State(set())
 
-        dl_btn.click(download_handler, inputs=[file_group, probe_state], outputs=[dl_status])
+        probe_btn.click(probe_handler, inputs=[magnet_box],
+                        outputs=[probe_status, browse_dd, folders_group, files_group,
+                                 data_state, sel_state, sel_summary])
+        folders_group.change(on_folders_change,
+                             inputs=[folders_group, browse_dd, data_state, sel_state],
+                             outputs=[sel_state, sel_summary, files_group])
+        browse_dd.change(on_browse_change,
+                         inputs=[browse_dd, data_state, sel_state],
+                         outputs=[files_group])
+        files_group.change(on_files_change,
+                           inputs=[files_group, browse_dd, data_state, sel_state],
+                           outputs=[sel_state, sel_summary, folders_group])
+        pick_all_btn.click(lambda b, d, s: _force_view(b, d, s, True),
+                           inputs=[browse_dd, data_state, sel_state],
+                           outputs=[sel_state, sel_summary, folders_group, files_group])
+        clear_view_btn.click(lambda b, d, s: _force_view(b, d, s, False),
+                             inputs=[browse_dd, data_state, sel_state],
+                             outputs=[sel_state, sel_summary, folders_group, files_group])
+        dl_btn.click(download_handler, inputs=[data_state, sel_state], outputs=[dl_status])
+
         scan_btn.click(scan_handler, inputs=[target_res],
                        outputs=[plan_table, include_group, scan_summary])
         run_btn.click(run_handler,

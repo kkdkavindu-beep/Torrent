@@ -23,8 +23,11 @@ app (the libtorrent patterns here are ported from it).
 ## Workflow
 
 **Tab 1 · Download** — paste a magnet link → *Fetch file list* (metadata only,
-nothing is downloaded yet) → uncheck files you don't want → *Start download*.
-Progress (per file, speed, peers, ETA) auto-refreshes every second.
+nothing is downloaded yet). Torrents with folders get a **folder checklist**
+(one click selects/deselects everything inside) plus a *Browse inside a folder*
+dropdown for picking individual files, with "all/clear view" buttons and a live
+"Selected x/y files" summary. Hit *Start download*; progress (per file, speed,
+peers, ETA) auto-refreshes every second.
 
 **Tab 2 · Videos → Drive** — *Scan downloads* probes every media file with
 ffprobe and shows container / codec / resolution / audio. Choose a target
