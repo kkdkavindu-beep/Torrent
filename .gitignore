@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.cache/
+workspace/
+downloads/
+converted/
+drive_staging/
+*.part
+.ipynb_checkpoints/
+.zcode/
